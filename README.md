@@ -1,0 +1,7 @@
+The file exists. Running the three-way comparison now.All clean — 566 unique rows, no parse errors. Running the full three-way comparison against the vision-based ground truth.Ran the three-way comparison against the vision-based read (ground truth). Both local methods land around 60-65% exact match, but they fail in opposite directions:
+
+**Local OCR (EasyOCR):** 60.2% exact match. Missed 66 photos vision caught, invented bibs on 61 photos vision said had none. Conservative but sloppy — 190 distinct "bibs" found, only 89 confirmed by vision.
+
+**Gemma (gemma4:e4b):** 64.8% exact match — slightly better overall, and much better recall (missed only 23 photos vision caught, vs. OCR's 66). But it hallucinates far more: 326 distinct "bibs" found, only 116 confirmed by vision. On 69 photos where vision found nothing at all, Gemma invented numbers anyway — including one case (`_5D_0473.JPG`) where it listed eight different single/double-digit "bibs" out of thin air.
+
+The pattern: Gemma rarely says "I don't see a bib," even when there genuinely isn't one (especially in the cycling-race frames with no pinned bibs) — it guesses instead. OCR misses more real bibs but invents less. Neither is a reliable stand-in for the vision-based pass; `bib_comparison_3way.csv` has the full row-by-row breakdown (`ocr_vs_vision` / `gemma_vs_vision` columns) if you want to dig into specific photos.
