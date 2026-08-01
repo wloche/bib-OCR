@@ -35,6 +35,7 @@ USAGE
     python bib_gemma.py --input /path/to/photos --output bib_numbers_gemma.xlsx --recursive
     python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
     python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
+    python bib_gemma.py --input /path/to/photos --quiet --output out.csv
 
 OUTPUT
     A CSV (or XLSX, if the output filename ends in .xlsx) with one row per photo:
@@ -54,6 +55,13 @@ PROGRESS
     script says up front how many of the photos it found are being skipped,
     and repeats that reminder at the end so a partial output file isn't
     mistaken for a complete one.
+
+    --quiet silences all of that (progress lines, ETA, the --limit notice and
+    the final summary) and leaves only errors and warnings, on stderr: a
+    per-photo "parse_error: <file>: <raw response>" line for each photo that
+    failed, plus the usual fatal errors. Handy for cron jobs and scripts —
+    redirect stderr to a log and no news is good news. The output CSV/XLSX is
+    identical either way.
 
 NOTES
     - This calls a local Ollama server (default http://localhost:11434) — no
@@ -216,7 +224,15 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                          help="Only process the first N photos found (useful for a quick "
                               "test run or benchmarking a model). Default: all of them")
+    parser.add_argument("--quiet", action="store_true",
+                         help="Suppress progress, ETA and summary output — report only "
+                              "errors and warnings (on stderr). Useful for cron/scripts.")
     args = parser.parse_args()
+
+    def info(*parts, **kwargs):
+        """Print normal progress output, unless --quiet was passed."""
+        if not args.quiet:
+            print(*parts, **kwargs)
 
     input_dir = Path(args.input)
     if not input_dir.is_dir():
@@ -257,17 +273,17 @@ def main():
     total_found = len(images)
     if args.limit is not None and args.limit < total_found:
         images = images[:args.limit]
-        print(f"NOTE: --limit {args.limit} is set — only the first {args.limit} of "
-              f"{total_found} photo(s) found will be processed. The output file will "
-              f"cover those {args.limit} photo(s) only.")
+        info(f"NOTE: --limit {args.limit} is set — only the first {args.limit} of "
+             f"{total_found} photo(s) found will be processed. The output file will "
+             f"cover those {args.limit} photo(s) only.")
 
-    print(f"Processing {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
+    info(f"Processing {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
 
     rows = []
     run_start = time.monotonic()
     for i, img_path in enumerate(images, 1):
         # No newline yet: the timing/ETA is appended once this photo is done.
-        print(f"[{i}/{len(images)}] {img_path.name} ... ", end="", flush=True)
+        info(f"[{i}/{len(images)}] {img_path.name} ... ", end="", flush=True)
         photo_start = time.monotonic()
 
         bibs, notes, ok = None, "", False
@@ -294,7 +310,11 @@ def main():
         if ok:
             rows.append([img_path.name, bibs, notes])
         else:
-            rows.append([img_path.name, "parse_error", last_raw.replace("\n", " ")[:200]])
+            detail = last_raw.replace("\n", " ")[:200]
+            rows.append([img_path.name, "parse_error", detail])
+            if args.quiet:
+                # The inline progress line is hidden, so failures still need a voice.
+                print(f"parse_error: {img_path.name}: {detail}", file=sys.stderr)
 
         # ETA from the average time per photo so far, which smooths out the
         # variation between a quick photo and a slow, crowded one.
@@ -304,10 +324,10 @@ def main():
         summary = bibs if ok else "parse_error"
         if remaining:
             eta = (elapsed / i) * remaining
-            print(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}, "
-                  f"ETA {format_duration(eta)}]")
+            info(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}, "
+                 f"ETA {format_duration(eta)}]")
         else:
-            print(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}]")
+            info(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}]")
 
     total_secs = time.monotonic() - run_start
 
@@ -320,13 +340,13 @@ def main():
     detected = sum(1 for r in rows if r[1] not in ("none", "parse_error"))
     errors = sum(1 for r in rows if r[1] == "parse_error")
     skipped = total_found - len(rows)
-    print(f"\nDone. {detected}/{len(rows)} photos had a plausible bib number "
-          f"({errors} parse errors). Wrote results to {output_path}")
+    info(f"\nDone. {detected}/{len(rows)} photos had a plausible bib number "
+         f"({errors} parse errors). Wrote results to {output_path}")
     if skipped:
-        print(f"Reminder: --limit was set, so {skipped} of the {total_found} photo(s) "
-              f"found were not processed.")
-    print(f"Total time: {format_duration(total_secs)} "
-          f"({total_secs / len(rows):.1f}s per photo average)")
+        info(f"Reminder: --limit was set, so {skipped} of the {total_found} photo(s) "
+             f"found were not processed.")
+    info(f"Total time: {format_duration(total_secs)} "
+         f"({total_secs / len(rows):.1f}s per photo average)")
 
 
 if __name__ == "__main__":

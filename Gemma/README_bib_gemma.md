@@ -56,6 +56,9 @@ python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
 
 # Quick trial run over just the first 10 photos
 python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
+
+# Silent run — only errors are reported (for cron jobs and scripts)
+python bib_gemma.py --input /path/to/photos --quiet --output out.csv
 ```
 
 ## Options
@@ -69,6 +72,7 @@ python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
 | `--host` | `http://localhost:11434` | Ollama server URL |
 | `--retries` | `1` | Retries if a response can't be parsed |
 | `--limit` | *(all)* | Only process the first N photos found |
+| `--quiet` | off | Report only errors and warnings, on stderr |
 
 ## Progress and timing
 
@@ -113,6 +117,28 @@ Notes:
 - Write trial runs to a separate output file (`sample.csv` above). Pointing `--limit` at your real output path overwrites it with the partial results.
 - If `--limit` is greater than or equal to the number of photos found, it has no effect and no disclaimer is shown.
 - Multiply the reported per-photo average by your full photo count to estimate the real run: `8.4s × 566 ≈ 1h 20m`.
+
+## Quiet mode
+
+`--quiet` turns off everything described above — progress lines, per-photo timings, the ETA, the `--limit` notice and the final summary — and reports **only errors and warnings, on stderr**. A successful run prints absolutely nothing:
+
+```bash
+python bib_gemma.py --input /path/to/photos --quiet --output out.csv
+```
+
+What still gets reported in quiet mode:
+
+- One line per photo the model failed on: `parse_error: _5D_0200.JPG: <raw response, truncated>`
+- The pre-flight warning when `--model` isn't in `ollama list`
+- All fatal errors (bad `--input`, unreachable Ollama, missing `ollama`/`openpyxl` package, no JPGs found), each still exiting non-zero
+
+Because everything lands on stderr, this suits cron jobs and scripts — redirect stderr to a log and no news is good news:
+
+```bash
+python bib_gemma.py --input ./photos --quiet --output out.csv 2>>bib_errors.log
+```
+
+The output CSV/XLSX is byte-for-byte the same as a normal run; `--quiet` only affects the console. Note that `parse_error` rows are already recorded in the output file with their raw response, so the stderr lines are a convenience, not the only record.
 
 ## Output format
 
