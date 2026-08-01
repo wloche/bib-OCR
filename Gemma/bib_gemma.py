@@ -37,15 +37,36 @@ USAGE
     python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
     python bib_gemma.py --input /path/to/photos --quiet --output out.csv
     python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.csv
+    python bib_gemma.py --input /path/to/cycling --race-type cyclists --output out.csv
 
 OUTPUT
     A CSV (or XLSX, if the output filename ends in .xlsx) with one row per photo:
         filename, bib_numbers, colors, notes
     Multiple bibs in one photo are separated with semicolons: "482;217"
-    "none" means the model found no legible bib number in the photo.
+    "none" means there was no bib in the photo at all.
+    "illegible" means a bib was visible but not readable — on its own, or
+    alongside numbers ("852;illegible") when only some bibs could be read.
     "colors" is what the model reports seeing for each bib, in the same order
     ("black on white; unclear"). It is recorded, never used to filter — see
     FILTERING below for why.
+
+RACE TYPE
+    --race-type runners|cyclists|mixed tunes what the model is told to look for.
+    This matters more than it sounds: the default "mixed" prompt has to cover
+    both disciplines, so it permits numbers "printed directly on a jersey" —
+    harmless for runners, but in cycling frames full of sponsor lettering it is
+    the main source of fabricated readings. On the 566-photo reference set every
+    single invent-a-number-from-nothing error fell in the cycling half.
+
+        --race-type runners    bib is a card pinned to the front torso; almost
+                               every runner has one; ignore clocks and signage
+        --race-type cyclists   small number on hip/lower back or a frame plate;
+                               "none" is often correct; sponsor text is not a bib
+
+    Run each block of photos separately with the matching race type when you
+    can. Note that cyclists at these events do wear numbers — they are just
+    small and often unreadable — so the cyclists prompt is written to reach for
+    "illegible", not to assume there is nothing there.
 
 FILTERING
     The known shape of a race's numbering is a far stronger signal than
@@ -59,6 +80,7 @@ FILTERING
     Both are applied after parsing, per reading, and discarded numbers are
     recorded in the notes column ("filtered out: 45, 7") so that a too-strict
     filter is visible in the output rather than silently swallowing real bibs.
+    An "illegible" marker is never filtered — there is no number to judge.
 
     Colors are deliberately *not* used as a filter. Race lighting (backlight,
     shade, motion blur, mixed white balance) shifts apparent color enough that
@@ -107,13 +129,56 @@ import sys
 import time
 from pathlib import Path
 
-PROMPT = """You are looking at a photo from a running/cycling race. Look carefully at every person in the frame for a race bib number — a numbered card, tag, or plate pinned to someone's chest, waist, or back (or printed directly on a jersey).
+# Sentinel for "a bib is there, but I can't read it" — distinct from "none".
+# Without this the model has to choose between a number and denying the bib
+# exists, and it reliably picks a fabricated number.
+ILLEGIBLE = "illegible"
 
+# What to look for, per discipline. Only this opening paragraph changes; the
+# response format below is shared so parsing is identical across race types.
+#
+# The "mixed" text has to accommodate both disciplines at once, which is why it
+# ends up permitting jersey-printed numbers — harmless for runners, but the main
+# source of fabricated readings in cycling frames full of sponsor lettering.
+# Naming the discipline lets each variant be strict instead of accommodating.
+PROMPT_LEADS = {
+    "mixed": (
+        "You are looking at a photo from a running/cycling race. Look carefully at every "
+        "person in the frame for a race bib number — a numbered card, tag, or plate pinned "
+        "to someone's chest, waist, or back (or printed directly on a jersey)."
+    ),
+    "runners": (
+        "You are looking at a photo from a running race. Look carefully at every runner in "
+        "the frame for a race bib: a numbered paper or plastic card pinned to the front of "
+        "the torso — chest or stomach — with large printed digits. A few runners pin theirs "
+        "to the back instead. Nearly every runner in an official race wears one, so if you "
+        "can see a runner's front torso clearly, there is usually a bib to find.\n\n"
+        "Do NOT report numbers from timing clocks, road signs, sponsor banners, vehicles, "
+        "or clothing brand graphics — only a pinned race bib counts."
+    ),
+    "cyclists": (
+        "You are looking at a photo from a cycling race. Riders' numbers are small and easy "
+        "to miss: usually a square number pinned to the lower back, hip, or side of the "
+        "jersey, sometimes a plate mounted on the bike's frame or handlebars. They are often "
+        "creased, curved around the body, or hidden by the rider's arm or riding position.\n\n"
+        "Two things to be careful about:\n"
+        "- Many riders in these photos wear no visible race number at all. \"none\" is a "
+        "common and correct answer here.\n"
+        "- Team kit is covered in sponsor lettering, brand names and numbers that are NOT "
+        "race bibs. Do not report sponsor text, jersey logos, bike model numbers, or numbers "
+        "on barriers, banners and vehicles. Only a pinned race number or a mounted number "
+        "plate counts."
+    ),
+}
+
+RESPONSE_FORMAT = """
 Respond in EXACTLY this format, nothing else:
 
-BIBS: <comma-separated numbers, or "none" if no legible bib is visible>
-COLORS: <for each bib listed, "<digit color> on <background color>", comma-separated in the same order — leave blank if no bib was found>
+BIBS: <comma-separated numbers; write "illegible" in place of a number for a bib you can see but cannot actually read; write "none" if there is no bib at all>
+COLORS: <for each entry in BIBS, "<digit color> on <background color>", comma-separated in the same order — leave blank if BIBS is none>
 NOTES: <one short phrase — leave blank if nothing notable, e.g. "back bib" or "partially obscured">
+
+Do not guess at digits you cannot make out. "illegible" is a better answer than a number you are unsure of, and "none" is a better answer than a bib that isn't there.
 
 Report the colors you actually see. Do not guess at a colour scheme you expect a race to use — if a bib's colors aren't clear, write "unclear" for that bib.
 
@@ -126,14 +191,30 @@ BIBS: 482, 217, 90
 COLORS: black on white, black on white, unclear
 NOTES: one bib partially cropped at frame edge
 
+BIBS: 852, illegible
+COLORS: black on white, unclear
+NOTES: second bib too small to read
+
+BIBS: illegible
+COLORS: unclear
+NOTES: bib visible but heavily motion-blurred
+
 BIBS: none
 COLORS:
-NOTES: cyclists in team kits, no pinned bib visible
+NOTES: no pinned bib visible
 """
 
-BIBS_RE = re.compile(r"BIBS:\s*(.+)", re.IGNORECASE)
-COLORS_RE = re.compile(r"COLORS?:\s*(.*)", re.IGNORECASE)
-NOTES_RE = re.compile(r"NOTES:\s*(.*)", re.IGNORECASE)
+
+def build_prompt(race_type: str) -> str:
+    return PROMPT_LEADS[race_type] + "\n" + RESPONSE_FORMAT
+
+
+# [ \t]* rather than \s* so an empty field can't swallow the following line —
+# "COLORS:\nNOTES: foo" must yield an empty colors field, not "NOTES: foo".
+BIBS_RE = re.compile(r"BIBS:[ \t]*(.+)", re.IGNORECASE)
+COLORS_RE = re.compile(r"COLORS?:[ \t]*(.*)", re.IGNORECASE)
+NOTES_RE = re.compile(r"NOTES:[ \t]*(.*)", re.IGNORECASE)
+ILLEGIBLE_RE = re.compile(r"illegible|unreadable|can'?t read|not legible", re.IGNORECASE)
 
 
 def format_duration(seconds: float) -> str:
@@ -160,9 +241,10 @@ def find_images(input_dir: Path, recursive: bool, extensions):
 def parse_response(text: str):
     """Pull bib numbers, colors and notes out of the model's reply.
 
-    Returns (bibs, colors, notes, ok) where bibs is a list of digit strings
-    (empty list means the model reported no legible bib) and colors is a
-    same-length list of the color description it gave for each bib.
+    Returns (bibs, colors, notes, ok) where bibs is a list whose entries are
+    either a digit string or the literal "illegible" (a bib the model could see
+    but not read). An empty list means it reported no bib at all. colors is a
+    same-length list of the description it gave for each entry.
     On a parse failure, bibs is None and notes holds the raw reply.
     """
     bibs_match = BIBS_RE.search(text)
@@ -180,26 +262,40 @@ def parse_response(text: str):
     if raw_bibs.lower().startswith("none"):
         return [], [], notes, True
 
-    # pull out just the digit runs, in order, deduplicated — keeping the color
-    # the model gave for each number's first occurrence
-    nums = re.findall(r"\d+", raw_bibs)
-    seen = set()
-    unique, colors = [], []
-    for idx, n in enumerate(nums):
-        if n in seen:
+    # Walk the comma-separated entries so an "illegible" marker survives next to
+    # real numbers ("852, illegible"). Colors are aligned to the entry index,
+    # which is the ordering the model was asked to use.
+    entries = []
+    for idx, part in enumerate(raw_bibs.split(",")):
+        part = part.strip()
+        if not part:
             continue
-        seen.add(n)
-        unique.append(n)
-        # The model is asked for one color per bib in the same order. If it gave
-        # a single description for several bibs, reuse it; if it gave none, blank.
-        if idx < len(color_parts):
-            colors.append(color_parts[idx])
-        elif len(color_parts) == 1:
-            colors.append(color_parts[0])
-        else:
-            colors.append("")
+        nums = re.findall(r"\d+", part)
+        if nums:
+            entries.extend((n, idx) for n in nums)
+        elif ILLEGIBLE_RE.search(part):
+            entries.append((ILLEGIBLE, idx))
 
-    return unique, colors, notes, True
+    def color_for(idx):
+        # One color per bib, in order. If the model gave a single description for
+        # several bibs, reuse it; if it gave none, leave the column blank.
+        if idx < len(color_parts):
+            return color_parts[idx]
+        return color_parts[0] if len(color_parts) == 1 else ""
+
+    # Deduplicate, keeping the color given for each entry's first occurrence.
+    # Repeated "illegible" markers collapse to one: the number of unreadable
+    # bibs in a frame isn't something a small model reports reliably.
+    seen = set()
+    bibs, colors = [], []
+    for value, idx in entries:
+        if value in seen:
+            continue
+        seen.add(value)
+        bibs.append(value)
+        colors.append(color_for(idx))
+
+    return bibs, colors, notes, True
 
 
 def parse_bib_range(spec: str):
@@ -223,6 +319,11 @@ def apply_filters(bibs, colors, min_digits, bib_range):
     """
     kept, kept_colors, dropped = [], [], []
     for n, c in zip(bibs, colors):
+        if n == ILLEGIBLE:
+            # Not a reading, so there's nothing to judge plausible — keep it.
+            kept.append(n)
+            kept_colors.append(c)
+            continue
         if min_digits and len(n) < min_digits:
             dropped.append(n)
             continue
@@ -270,6 +371,7 @@ def write_xlsx(rows, output_path: Path):
     body_font = Font(name="Arial", size=10)
     none_fill = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")
     error_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+    illegible_fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
     for r in range(2, ws.max_row + 1):
         for c in range(1, 5):
             ws.cell(row=r, column=c).font = body_font
@@ -278,6 +380,9 @@ def write_xlsx(rows, output_path: Path):
             ws.cell(row=r, column=2).fill = none_fill
         elif val in ("parse_error", "error"):
             ws.cell(row=r, column=2).fill = error_fill
+        elif ILLEGIBLE in val:
+            # Amber: worth a manual look, unlike a confident "none".
+            ws.cell(row=r, column=2).fill = illegible_fill
 
     for i, w in enumerate([22, 30, 28, 55], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -313,6 +418,10 @@ def main():
     parser.add_argument("--bib-range", default=None, metavar="LOW-HIGH",
                          help="Discard readings outside this numeric range, e.g. 1000-1699. "
                               "The strongest filter available if you know the race's numbering.")
+    parser.add_argument("--race-type", choices=sorted(PROMPT_LEADS), default="mixed",
+                         help="Tailor the prompt to the discipline: 'runners' (bib pinned to "
+                              "the front torso) or 'cyclists' (small number on hip/lower back, "
+                              "sponsor lettering is not a bib). Default: mixed")
     args = parser.parse_args()
 
     def info(*parts, **kwargs):
@@ -375,7 +484,9 @@ def main():
              f"{total_found} photo(s) found will be processed. The output file will "
              f"cover those {args.limit} photo(s) only.")
 
+    prompt = build_prompt(args.race_type)
     info(f"Processing {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
+    info(f"Prompt tuned for: {args.race_type}")
     if args.min_digits or bib_range:
         criteria = []
         if args.min_digits:
@@ -401,7 +512,7 @@ def main():
                     model=args.model,
                     messages=[{
                         "role": "user",
-                        "content": PROMPT,
+                        "content": prompt,
                         "images": [str(img_path)],
                     }],
                 )
@@ -454,11 +565,15 @@ def main():
     else:
         write_csv(rows, output_path)
 
-    detected = sum(1 for r in rows if r[1] not in ("none", "parse_error"))
+    # A photo counts as "read" only if a number came out of it; a bib the model
+    # saw but couldn't read is reported separately rather than as a detection.
+    detected = sum(1 for r in rows if re.search(r"\d", r[1]))
+    illegible_only = sum(1 for r in rows if r[1] == ILLEGIBLE)
     errors = sum(1 for r in rows if r[1] == "parse_error")
     skipped = total_found - len(rows)
-    info(f"\nDone. {detected}/{len(rows)} photos had a plausible bib number "
-         f"({errors} parse errors). Wrote results to {output_path}")
+    info(f"\nDone. {detected}/{len(rows)} photos yielded a bib number "
+         f"({illegible_only} bib seen but unreadable, {errors} parse errors). "
+         f"Wrote results to {output_path}")
     if filtered_count:
         info(f"Filters discarded {filtered_count} reading(s) as implausible "
              f"(see the notes column for which).")

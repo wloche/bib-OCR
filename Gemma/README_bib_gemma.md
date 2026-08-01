@@ -62,6 +62,10 @@ python bib_gemma.py --input /path/to/photos --quiet --output out.csv
 
 # Discard readings outside the race's actual number range
 python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.csv
+
+# Tune the prompt to the discipline
+python bib_gemma.py --input ./running-photos --race-type runners  --output run.csv
+python bib_gemma.py --input ./cycling-photos --race-type cyclists --output ride.csv
 ```
 
 ## Options
@@ -78,6 +82,7 @@ python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.c
 | `--quiet` | off | Report only errors and warnings, on stderr |
 | `--min-digits` | off | Discard readings with fewer than N digits |
 | `--bib-range` | off | Discard readings outside `LOW-HIGH`, e.g. `1000-1699` |
+| `--race-type` | `mixed` | Tune the prompt: `runners`, `cyclists` or `mixed` |
 
 ## Progress and timing
 
@@ -152,14 +157,64 @@ CSV/XLSX with four columns:
 | filename | bib_numbers | colors | notes |
 |---|---|---|---|
 | `_5D_0004.JPG` | `129;1171` | black on white; black on white | |
-| `_5D_0100.JPG` | `none` | | cyclists in team kits, no pinned bib visible |
+| `_5D_0100.JPG` | `none` | | riders in team kit, no number visible |
+| `_5D_0120.JPG` | `852;illegible` | black on white; unclear | second bib too small to read |
+| `_5D_0140.JPG` | `illegible` | unclear | heavily motion-blurred |
 | `_5D_0150.JPG` | `1204` | black on white | distant runners \| filtered out: 45, 7 |
 | `_5D_0200.JPG` | `parse_error` | | *(raw model response, truncated)* |
 
 - Multiple bibs in one photo are semicolon-separated.
 - `colors` is the model's own description of each bib it reported, in the same order — `black on white`, `white on blue`, or `unclear`. It's recorded for analysis, never used to filter (see below).
-- `none` means the model found no legible bib number in the photo — or that every number it reported was removed by a filter, in which case `notes` says which.
+- `none` means there was no bib in the photo at all — or that every number reported was removed by a filter, in which case `notes` says which.
+- `illegible` means a bib was visible but couldn't be read. It appears on its own, or alongside numbers (`852;illegible`) when only some bibs in the frame were readable. See below for why this matters.
 - `parse_error` means the model's reply didn't follow the expected format even after retries — the raw response is kept in `notes` so you can see what happened, rather than the script silently guessing.
+
+In XLSX output these are colour-coded in the bib column: grey for `none`, amber for `illegible` (worth a manual look), red for `parse_error`.
+
+## `illegible`: giving the model a way to admit uncertainty
+
+The original prompt offered a binary — a number, or `none`. A model facing a bib it can see but can't read had no way to say so, and both Gemma sizes resolve that by inventing a plausible number. Against the hosted vision read, which marked 31 photos `illegible`, `e2b` produced a confident number on 14 of them. Those readings are wrong by construction, not by bad luck.
+
+So `illegible` is now a first-class answer, and the prompt says outright that it beats a guess:
+
+> Do not guess at digits you cannot make out. "illegible" is a better answer than a number you are unsure of, and "none" is a better answer than a bib that isn't there.
+
+Practical notes:
+
+- `illegible` is never removed by `--min-digits`/`--bib-range` — there's no number to judge.
+- Repeated `illegible` markers in one reply collapse to one. The count of unreadable bibs in a frame isn't something a small model reports reliably.
+- The end-of-run summary counts these separately, so they don't inflate the detection rate: `3/5 photos yielded a bib number (1 bib seen but unreadable, 0 parse errors)`.
+- These rows are the best candidates for a manual pass — the model is telling you exactly where it needed a closer look.
+
+## Race type
+
+`--race-type` changes what the model is told to look for. This matters more than it sounds, because the default `mixed` prompt has to serve both disciplines at once, and that compromise is measurably expensive.
+
+On the 566-photo reference set the shoot splits into a running block and a cycling block:
+
+| | running block (192 photos) | cycling block (374 photos) |
+|---|---|---|
+| vision read a number | 173 (90%) | 45 (12%) |
+| vision saw a bib but couldn't read it | 5 | 26 |
+| vision found no bib at all | 14 (7%) | 303 (81%) |
+| **`e2b` fabricated readings** | **0 photos, 0 readings** | **57 photos, 104 readings** |
+
+Every fabricated-from-nothing reading in the entire run falls in the cycling block. The reason is a single clause the `mixed` prompt needs in order to cover runners whose number is printed on their kit — it permits numbers *"printed directly on a jersey"*. Harmless in a running photo; in a cycling photo, where team kit is covered in sponsor lettering and most riders have no visible number, it's an invitation.
+
+```bash
+python bib_gemma.py --input ./running-photos --race-type runners  --output run.csv
+python bib_gemma.py --input ./cycling-photos --race-type cyclists --output ride.csv
+```
+
+| | what the prompt says |
+|---|---|
+| `runners` | Bib is a card pinned to the **front torso**, large digits; nearly every runner has one, so keep looking if a torso is visible. Ignore timing clocks, road signs, banners, vehicles, brand graphics. |
+| `cyclists` | Number is **small**, on the hip, lower back or side of the jersey, or a plate on the frame — often creased, curved or hidden by the rider's arm. `none` is a common correct answer. Sponsor lettering, jersey logos and bike model numbers are **not** bibs. |
+| `mixed` | The original prompt, covering both. Still the default, so existing runs are unaffected apart from `illegible` now being available. |
+
+Run each block of photos separately with the matching race type where you can — separate folders, one invocation each.
+
+**The cyclists prompt is deliberately not "expect nothing".** Riders at these events do wear numbers: the vision read finds 45 real ones in the cycling block, including a clean run of `852`/`859`/`1065` across frames 883–944, and calls 26 more illegible. A prompt that assumed no bibs would trade 45 real detections for the 104 fabrications, which is not obviously a win. It's written to reach for `illegible` instead.
 
 ## Filtering out implausible readings
 
@@ -208,12 +263,14 @@ Recording the color instead lets you check offline whether it actually correlate
 Each photo is sent to the model with a fixed prompt asking it to reply in exactly this shape:
 
 ```
-BIBS: <comma-separated numbers, or "none">
+BIBS: <comma-separated numbers, "illegible" per unreadable bib, or "none">
 COLORS: <"<digit color> on <background color>" per bib, same order, or "unclear">
 NOTES: <one short phrase, optional>
 ```
 
-The script regex-parses that fixed format rather than relying on free-form text, which keeps results consistent across runs. Duplicate numbers in one reply are collapsed, keeping the color given for the first occurrence, and a reply that omits the `COLORS:` line still parses — the column is just left blank. Any `--min-digits` / `--bib-range` filtering happens after this parse, in Python, so the model never knows what numbering you expect.
+Only the opening "what to look for" paragraph changes between race types; this response block is shared, so parsing is identical whichever one you pick.
+
+The script regex-parses that fixed format rather than relying on free-form text, which keeps results consistent across runs. Duplicate numbers in one reply are collapsed, keeping the color given for the first occurrence; a reply that omits the `COLORS:` line still parses with the column left blank; and `unreadable` / `can't read` / `not legible` are accepted as synonyms for `illegible`. Any `--min-digits` / `--bib-range` filtering happens after this parse, in Python, so the model never knows what numbering you expect.
 
 ## Performance
 
@@ -225,6 +282,11 @@ You don't have to guess where a given run will land: the per-photo ETA (see [Pro
 
 Smaller local vision models are still not as reliable as a top-tier hosted model — expect some misses on very small, heavily motion-blurred, or steeply angled bibs. It should still substantially outperform `../local-OCR/bib_ocr.py` on the same photos, since it can reason about context instead of just transcribing text. Compare its output against `../local-OCR/bib_ocr.py`'s to see where the two disagree, and spot-check `none`/`parse_error` rows manually.
 
-`--min-digits`/`--bib-range` improve precision but can't fix recall: they remove junk the model reported, and do nothing about bibs it never saw. The likely root cause of the misses is resolution — a bib a few dozen pixels tall in a full frame — so cropping candidate regions before inference would probably help more than any prompt or filter change. The `colors` column exists partly to test that theory: if `unclear` clusters on the photos where readings are wrong, the model is telling you it couldn't resolve the bib.
+`--min-digits`/`--bib-range` improve precision but can't fix recall: they remove junk the model reported, and do nothing about bibs it never saw. The likely root cause of the misses is resolution — a bib a few dozen pixels tall in a full frame — so cropping candidate regions before inference would probably help more than any prompt or filter change. The `colors` and `illegible` fields exist partly to test that theory: if `unclear`/`illegible` cluster on the photos where readings are wrong, the model is telling you it couldn't resolve the bib.
 
-Note also that the accuracy figures quoted here are agreement with a hosted vision model's read, not human-verified ground truth.
+Two caveats on the numbers quoted above:
+
+- They're agreement with a hosted vision model's read, not human-verified ground truth.
+- The running/cycling split was inferred from the pattern of no-bib photos plus the note about team kit in `../README.md`, not from inspecting the photos. Worth eyeballing the boundary frames before treating the block sizes as exact.
+
+`--race-type` is also untested against ground truth so far — the reasoning for it is sound and the failure it targets is precisely located, but no before/after measurement has been run. The cycling block is the natural test bed: frames from ~950 onward are essentially 100% no-bib, so any number the model reports there is unambiguously wrong, and a `--limit 40` run with and without `--race-type cyclists` will show the difference in a couple of minutes.
