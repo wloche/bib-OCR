@@ -38,10 +38,11 @@ USAGE
     python bib_gemma.py --input /path/to/photos --quiet --output out.csv
     python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.csv
     python bib_gemma.py --input /path/to/cycling --race-type cyclists --output out.csv
+    python bib_gemma.py --input /path/to/photos --teams "xXx, 606" --output out.csv
 
 OUTPUT
     A CSV (or XLSX, if the output filename ends in .xlsx) with one row per photo:
-        filename, bib_numbers, colors, notes
+        filename, bib_numbers, colors, [team,] notes
     Multiple bibs in one photo are separated with semicolons: "482;217"
     "none" means there was no bib in the photo at all.
     "illegible" means a bib was visible but not readable — on its own, or
@@ -49,6 +50,24 @@ OUTPUT
     "colors" is what the model reports seeing for each bib, in the same order
     ("black on white; unclear"). It is recorded, never used to filter — see
     FILTERING below for why.
+    "team" only appears when --teams is used; see TEAMS below.
+
+TEAMS
+    --teams adds a "team" column holding the club/team name on each person's
+    kit, in the same order as their bib ("xXx; 606"):
+
+        --teams                 read whatever team name is on the kit
+        --teams "xXx, 606"      as above, but match against the teams you know
+                                are competing
+
+    With a list, a case-insensitive match is normalised to your spelling ("xxx"
+    -> "xXx") so the column groups cleanly. A team that isn't on the list is
+    kept verbatim rather than rewritten or dropped: a name the model saw that
+    you didn't list is information, not an error to hide. Expect "unknown" a lot
+    — the prompt asks for it explicitly rather than letting the model infer a
+    team from kit colours, and on small/blurry kit that is the honest answer.
+    Note the list is given to the model as context, so the same priming caution
+    as for colors applies: treat the column as a lead to verify, not a fact.
 
 RACE TYPE
     --race-type runners|cyclists|mixed tunes what the model is told to look for.
@@ -176,43 +195,76 @@ Respond in EXACTLY this format, nothing else:
 
 BIBS: <comma-separated numbers; write "illegible" in place of a number for a bib you can see but cannot actually read; write "none" if there is no bib at all>
 COLORS: <for each entry in BIBS, "<digit color> on <background color>", comma-separated in the same order — leave blank if BIBS is none>
-NOTES: <one short phrase — leave blank if nothing notable, e.g. "back bib" or "partially obscured">
+{team_line}NOTES: <one short phrase — leave blank if nothing notable, e.g. "back bib" or "partially obscured">
 
 Do not guess at digits you cannot make out. "illegible" is a better answer than a number you are unsure of, and "none" is a better answer than a bib that isn't there.
 
 Report the colors you actually see. Do not guess at a colour scheme you expect a race to use — if a bib's colors aren't clear, write "unclear" for that bib.
-
+{team_guidance}
 Examples of valid responses:
 BIBS: 482
 COLORS: black on white
-NOTES:
+{team_example_1}NOTES:
 
 BIBS: 482, 217, 90
 COLORS: black on white, black on white, unclear
-NOTES: one bib partially cropped at frame edge
+{team_example_2}NOTES: one bib partially cropped at frame edge
 
 BIBS: 852, illegible
 COLORS: black on white, unclear
-NOTES: second bib too small to read
-
-BIBS: illegible
-COLORS: unclear
-NOTES: bib visible but heavily motion-blurred
+{team_example_3}NOTES: second bib too small to read
 
 BIBS: none
 COLORS:
-NOTES: no pinned bib visible
+{team_example_4}NOTES: no pinned bib visible
+"""
+
+# Asked for only when --teams is used, so the default prompt stays as short as
+# it was — every extra instruction is a chance for a small model to drift.
+TEAM_LINE = ('TEAM: <for each entry in BIBS, the team or club name on that person\'s kit, '
+             'or "unknown" — comma-separated in the same order>\n')
+
+TEAM_GUIDANCE_FREE = """
+For TEAM, read the team or club name printed on the person's jersey or kit. Write "unknown" if there is no team name visible or you cannot read it — do not infer a team from kit colours alone.
+"""
+
+TEAM_GUIDANCE_KNOWN = """
+For TEAM, read the team or club name printed on the person's jersey or kit. These teams are known to be competing:
+{teams}
+If the kit matches one of them, use that exact name. If it clearly shows a different team, write the name you see. Write "unknown" if there is no team name visible or you cannot read it — do not pick a name from the list just because it is on the list, and do not infer a team from kit colours alone.
 """
 
 
-def build_prompt(race_type: str) -> str:
-    return PROMPT_LEADS[race_type] + "\n" + RESPONSE_FORMAT
+def build_prompt(race_type: str, teams=None, ask_team: bool = False) -> str:
+    """Assemble the prompt. teams is an optional list of known team names."""
+    if not ask_team:
+        fields = {"team_line": "", "team_guidance": "",
+                  "team_example_1": "", "team_example_2": "",
+                  "team_example_3": "", "team_example_4": ""}
+    else:
+        if teams:
+            guidance = TEAM_GUIDANCE_KNOWN.format(teams="\n".join(f"- {t}" for t in teams))
+            named = teams[0]
+            second = teams[1] if len(teams) > 1 else "unknown"
+        else:
+            guidance = TEAM_GUIDANCE_FREE
+            named, second = "Riverside Runners", "unknown"
+        fields = {
+            "team_line": TEAM_LINE,
+            "team_guidance": guidance,
+            "team_example_1": f"TEAM: {named}\n",
+            "team_example_2": f"TEAM: {named}, {second}, unknown\n",
+            "team_example_3": f"TEAM: {named}, unknown\n",
+            "team_example_4": "TEAM:\n",
+        }
+    return PROMPT_LEADS[race_type] + "\n" + RESPONSE_FORMAT.format(**fields)
 
 
 # [ \t]* rather than \s* so an empty field can't swallow the following line —
 # "COLORS:\nNOTES: foo" must yield an empty colors field, not "NOTES: foo".
 BIBS_RE = re.compile(r"BIBS:[ \t]*(.+)", re.IGNORECASE)
 COLORS_RE = re.compile(r"COLORS?:[ \t]*(.*)", re.IGNORECASE)
+TEAM_RE = re.compile(r"TEAMS?:[ \t]*(.*)", re.IGNORECASE)
 NOTES_RE = re.compile(r"NOTES:[ \t]*(.*)", re.IGNORECASE)
 ILLEGIBLE_RE = re.compile(r"illegible|unreadable|can'?t read|not legible", re.IGNORECASE)
 
@@ -238,32 +290,68 @@ def find_images(input_dir: Path, recursive: bool, extensions):
     return sorted(set(files))
 
 
-def parse_response(text: str):
-    """Pull bib numbers, colors and notes out of the model's reply.
+def _field(text: str, pattern) -> str:
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
 
-    Returns (bibs, colors, notes, ok) where bibs is a list whose entries are
-    either a digit string or the literal "illegible" (a bib the model could see
-    but not read). An empty list means it reported no bib at all. colors is a
-    same-length list of the description it gave for each entry.
-    On a parse failure, bibs is None and notes holds the raw reply.
+
+def _aligned(parts, idx):
+    """The per-bib value at position idx.
+
+    The model is asked for one entry per bib in the same order as BIBS. If it
+    gave a single value for several bibs, reuse it; if it gave none, blank.
+    """
+    if idx < len(parts):
+        return parts[idx]
+    return parts[0] if len(parts) == 1 else ""
+
+
+def canonical_team(value: str, known_teams):
+    """Match a reported team against the known list, case-insensitively.
+
+    Returns the list's own spelling on a match ("xxx" -> "xXx") so the column
+    groups cleanly. Anything unmatched is kept verbatim rather than rewritten or
+    dropped — a team the model saw that isn't on the list is information, not an
+    error to hide.
+    """
+    if not value or not known_teams:
+        return value
+    folded = value.strip().lower()
+    for team in known_teams:
+        if folded == team.lower():
+            return team
+    return value
+
+
+def parse_response(text: str, known_teams=None):
+    """Pull bib numbers, colors, teams and notes out of the model's reply.
+
+    Returns (detections, notes, ok). Each detection is a dict:
+        {"bib": "482" or "illegible", "color": "black on white", "team": "xXx"}
+    Keeping the three together avoids the parallel-list alignment bugs that
+    per-bib fields otherwise invite. An empty list means the model reported no
+    bib at all. On a parse failure, detections is None and notes holds the raw
+    reply.
     """
     bibs_match = BIBS_RE.search(text)
     if not bibs_match:
-        return None, [], text.strip()[:200], False
+        return None, text.strip()[:200], False
 
     raw_bibs = bibs_match.group(1).strip()
-    notes_match = NOTES_RE.search(text)
-    notes = notes_match.group(1).strip() if notes_match else ""
+    notes = _field(text, NOTES_RE)
 
-    colors_match = COLORS_RE.search(text)
-    raw_colors = colors_match.group(1).strip() if colors_match else ""
-    color_parts = [c.strip() for c in raw_colors.split(",")] if raw_colors else []
+    def split_field(pattern):
+        raw = _field(text, pattern)
+        return [p.strip() for p in raw.split(",")] if raw else []
+
+    color_parts = split_field(COLORS_RE)
+    team_parts = split_field(TEAM_RE)
 
     if raw_bibs.lower().startswith("none"):
-        return [], [], notes, True
+        return [], notes, True
 
     # Walk the comma-separated entries so an "illegible" marker survives next to
-    # real numbers ("852, illegible"). Colors are aligned to the entry index,
+    # real numbers ("852, illegible"). Per-bib fields align on the entry index,
     # which is the ordering the model was asked to use.
     entries = []
     for idx, part in enumerate(raw_bibs.split(",")):
@@ -276,26 +364,23 @@ def parse_response(text: str):
         elif ILLEGIBLE_RE.search(part):
             entries.append((ILLEGIBLE, idx))
 
-    def color_for(idx):
-        # One color per bib, in order. If the model gave a single description for
-        # several bibs, reuse it; if it gave none, leave the column blank.
-        if idx < len(color_parts):
-            return color_parts[idx]
-        return color_parts[0] if len(color_parts) == 1 else ""
-
-    # Deduplicate, keeping the color given for each entry's first occurrence.
+    # Deduplicate, keeping the fields given for each entry's first occurrence.
     # Repeated "illegible" markers collapse to one: the number of unreadable
     # bibs in a frame isn't something a small model reports reliably.
     seen = set()
-    bibs, colors = [], []
+    detections = []
     for value, idx in entries:
         if value in seen:
             continue
         seen.add(value)
-        bibs.append(value)
-        colors.append(color_for(idx))
+        team = _aligned(team_parts, idx)
+        detections.append({
+            "bib": value,
+            "color": _aligned(color_parts, idx),
+            "team": canonical_team(team, known_teams),
+        })
 
-    return bibs, colors, notes, True
+    return detections, notes, True
 
 
 def parse_bib_range(spec: str):
@@ -309,40 +394,49 @@ def parse_bib_range(spec: str):
     return low, high
 
 
-def apply_filters(bibs, colors, min_digits, bib_range):
-    """Drop implausible readings. Returns (kept_bibs, kept_colors, dropped_bibs).
+def apply_filters(detections, min_digits, bib_range):
+    """Drop implausible readings. Returns (kept_detections, dropped_bibs).
 
     The known shape of a race's bib numbers is a much stronger signal than
     anything the model can tell us: on the reference set, 134 of 151 real bibs
     were 4-digit, while most fabricated readings were 1-3 digits. Dropped
     numbers are reported rather than silently discarded.
     """
-    kept, kept_colors, dropped = [], [], []
-    for n, c in zip(bibs, colors):
+    kept, dropped = [], []
+    for d in detections:
+        n = d["bib"]
         if n == ILLEGIBLE:
             # Not a reading, so there's nothing to judge plausible — keep it.
-            kept.append(n)
-            kept_colors.append(c)
-            continue
-        if min_digits and len(n) < min_digits:
+            kept.append(d)
+        elif min_digits and len(n) < min_digits:
             dropped.append(n)
-            continue
-        if bib_range and not (bib_range[0] <= int(n) <= bib_range[1]):
+        elif bib_range and not (bib_range[0] <= int(n) <= bib_range[1]):
             dropped.append(n)
-            continue
-        kept.append(n)
-        kept_colors.append(c)
-    return kept, kept_colors, dropped
+        else:
+            kept.append(d)
+    return kept, dropped
 
 
-def write_csv(rows, output_path: Path):
+# Column metadata, keyed by the CSV header name. The "team" column is only
+# present when --teams is used, so both writers take the column list.
+XLSX_HEADERS = {
+    "filename": "Photo Filename",
+    "bib_numbers": "Bib Number(s)",
+    "colors": "Colors",
+    "team": "Team",
+    "notes": "Notes",
+}
+XLSX_WIDTHS = {"filename": 22, "bib_numbers": 30, "colors": 28, "team": 22, "notes": 55}
+
+
+def write_csv(rows, output_path: Path, columns):
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["filename", "bib_numbers", "colors", "notes"])
+        writer.writerow(columns)
         writer.writerows(rows)
 
 
-def write_xlsx(rows, output_path: Path):
+def write_xlsx(rows, output_path: Path, columns):
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -356,13 +450,16 @@ def write_xlsx(rows, output_path: Path):
     ws = wb.active
     ws.title = "Bib Numbers"
 
-    ws.append(["Photo Filename", "Bib Number(s)", "Colors", "Notes"])
+    ncols = len(columns)
+    bib_col = columns.index("bib_numbers") + 1
+
+    ws.append([XLSX_HEADERS.get(c, c.title()) for c in columns])
     for row in rows:
         ws.append(row)
 
     header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    for col in range(1, 5):
+    for col in range(1, ncols + 1):
         c = ws.cell(row=1, column=col)
         c.font = header_font
         c.fill = header_fill
@@ -373,22 +470,23 @@ def write_xlsx(rows, output_path: Path):
     error_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
     illegible_fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
     for r in range(2, ws.max_row + 1):
-        for c in range(1, 5):
+        for c in range(1, ncols + 1):
             ws.cell(row=r, column=c).font = body_font
-        val = str(ws.cell(row=r, column=2).value or "").strip().lower()
+        cell = ws.cell(row=r, column=bib_col)
+        val = str(cell.value or "").strip().lower()
         if val == "none":
-            ws.cell(row=r, column=2).fill = none_fill
+            cell.fill = none_fill
         elif val in ("parse_error", "error"):
-            ws.cell(row=r, column=2).fill = error_fill
+            cell.fill = error_fill
         elif ILLEGIBLE in val:
             # Amber: worth a manual look, unlike a confident "none".
-            ws.cell(row=r, column=2).fill = illegible_fill
+            cell.fill = illegible_fill
 
-    for i, w in enumerate([22, 30, 28, 55], start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    for i, name in enumerate(columns, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = XLSX_WIDTHS.get(name, 20)
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:D{ws.max_row}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ncols)}{ws.max_row}"
     wb.save(output_path)
 
 
@@ -418,6 +516,12 @@ def main():
     parser.add_argument("--bib-range", default=None, metavar="LOW-HIGH",
                          help="Discard readings outside this numeric range, e.g. 1000-1699. "
                               "The strongest filter available if you know the race's numbering.")
+    parser.add_argument("--teams", nargs="?", const="", default=None, metavar="LIST",
+                         help="Also report each person's team in a 'team' column. Pass a "
+                              "comma-separated list of the teams competing (e.g. "
+                              "--teams 'xXx, 606') to have those names matched and spelled "
+                              "consistently, or pass --teams alone to read whatever is on "
+                              "the kit. Off by default.")
     parser.add_argument("--race-type", choices=sorted(PROMPT_LEADS), default="mixed",
                          help="Tailor the prompt to the discipline: 'runners' (bib pinned to "
                               "the front torso) or 'cyclists' (small number on hip/lower back, "
@@ -440,6 +544,13 @@ def main():
 
     if args.min_digits is not None and args.min_digits < 1:
         print("Error: --min-digits must be 1 or greater", file=sys.stderr)
+        sys.exit(1)
+
+    ask_team = args.teams is not None
+    known_teams = [t.strip() for t in args.teams.split(",") if t.strip()] if args.teams else []
+    if ask_team and args.teams and not known_teams:
+        print(f"Error: --teams was given '{args.teams}' but no team names could be read "
+              f"from it. Use a comma-separated list, e.g. --teams 'xXx, 606'", file=sys.stderr)
         sys.exit(1)
 
     bib_range = None
@@ -484,9 +595,15 @@ def main():
              f"{total_found} photo(s) found will be processed. The output file will "
              f"cover those {args.limit} photo(s) only.")
 
-    prompt = build_prompt(args.race_type)
+    prompt = build_prompt(args.race_type, known_teams, ask_team)
+    columns = ["filename", "bib_numbers", "colors"] + (["team"] if ask_team else []) + ["notes"]
+
     info(f"Processing {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
     info(f"Prompt tuned for: {args.race_type}")
+    if ask_team:
+        info(f"Also reporting team per bib"
+             + (f", matched against: {', '.join(known_teams)}" if known_teams
+                else " (reading whatever is on the kit)"))
     if args.min_digits or bib_range:
         criteria = []
         if args.min_digits:
@@ -498,13 +615,14 @@ def main():
 
     rows = []
     filtered_count = 0
+    team_photos = 0
     run_start = time.monotonic()
     for i, img_path in enumerate(images, 1):
         # No newline yet: the timing/ETA is appended once this photo is done.
         info(f"[{i}/{len(images)}] {img_path.name} ... ", end="", flush=True)
         photo_start = time.monotonic()
 
-        bibs, colors, notes, ok = None, [], "", False
+        detections, notes, ok = None, "", False
         last_raw = ""
         for attempt in range(args.retries + 1):
             try:
@@ -518,7 +636,7 @@ def main():
                 )
                 text = response["message"]["content"]
                 last_raw = text
-                bibs, colors, notes, ok = parse_response(text)
+                detections, notes, ok = parse_response(text, known_teams)
                 if ok:
                     break
             except Exception as e:
@@ -528,19 +646,26 @@ def main():
         if ok:
             dropped = []
             if args.min_digits or bib_range:
-                bibs, colors, dropped = apply_filters(bibs, colors, args.min_digits, bib_range)
+                detections, dropped = apply_filters(detections, args.min_digits, bib_range)
                 filtered_count += len(dropped)
             if dropped:
                 # Keep the discarded readings visible so a too-strict filter is
                 # obvious from the output file, not silently invisible.
                 note_parts = [p for p in (notes, f"filtered out: {', '.join(dropped)}") if p]
                 notes = " | ".join(note_parts)
-            summary = ";".join(bibs) if bibs else "none"
-            rows.append([img_path.name, summary, "; ".join(c for c in colors if c), notes])
+            summary = ";".join(d["bib"] for d in detections) if detections else "none"
+            row = [img_path.name, summary,
+                   "; ".join(d["color"] for d in detections if d["color"])]
+            if ask_team:
+                row.append("; ".join(d["team"] for d in detections if d["team"]))
+                team_photos += 1 if any(
+                    d["team"] and d["team"].lower() != "unknown" for d in detections) else 0
+            row.append(notes)
+            rows.append(row)
         else:
             detail = last_raw.replace("\n", " ")[:200]
             summary = "parse_error"
-            rows.append([img_path.name, summary, "", detail])
+            rows.append([img_path.name, summary, ""] + ([""] if ask_team else []) + [detail])
             if args.quiet:
                 # The inline progress line is hidden, so failures still need a voice.
                 print(f"parse_error: {img_path.name}: {detail}", file=sys.stderr)
@@ -561,9 +686,9 @@ def main():
 
     output_path = Path(args.output)
     if output_path.suffix.lower() == ".xlsx":
-        write_xlsx(rows, output_path)
+        write_xlsx(rows, output_path, columns)
     else:
-        write_csv(rows, output_path)
+        write_csv(rows, output_path, columns)
 
     # A photo counts as "read" only if a number came out of it; a bib the model
     # saw but couldn't read is reported separately rather than as a detection.
@@ -574,6 +699,9 @@ def main():
     info(f"\nDone. {detected}/{len(rows)} photos yielded a bib number "
          f"({illegible_only} bib seen but unreadable, {errors} parse errors). "
          f"Wrote results to {output_path}")
+    if ask_team:
+        info(f"A team was identified on {team_photos}/{len(rows)} photos "
+             f"(the rest are blank or 'unknown').")
     if filtered_count:
         info(f"Filters discarded {filtered_count} reading(s) as implausible "
              f"(see the notes column for which).")

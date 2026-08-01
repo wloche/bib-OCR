@@ -66,6 +66,9 @@ python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.c
 # Tune the prompt to the discipline
 python bib_gemma.py --input ./running-photos --race-type runners  --output run.csv
 python bib_gemma.py --input ./cycling-photos --race-type cyclists --output ride.csv
+
+# Also record each person's team, matched against the teams you know are racing
+python bib_gemma.py --input /path/to/photos --teams "xXx, 606" --output out.csv
 ```
 
 ## Options
@@ -83,6 +86,7 @@ python bib_gemma.py --input ./cycling-photos --race-type cyclists --output ride.
 | `--min-digits` | off | Discard readings with fewer than N digits |
 | `--bib-range` | off | Discard readings outside `LOW-HIGH`, e.g. `1000-1699` |
 | `--race-type` | `mixed` | Tune the prompt: `runners`, `cyclists` or `mixed` |
+| `--teams` | off | Add a `team` column; optionally pass the known team names |
 
 ## Progress and timing
 
@@ -170,6 +174,38 @@ CSV/XLSX with four columns:
 - `parse_error` means the model's reply didn't follow the expected format even after retries — the raw response is kept in `notes` so you can see what happened, rather than the script silently guessing.
 
 In XLSX output these are colour-coded in the bib column: grey for `none`, amber for `illegible` (worth a manual look), red for `parse_error`.
+
+A fifth column, `team`, appears between `colors` and `notes` when you pass `--teams` — see below. Without that flag the schema is exactly the four columns above.
+
+## Team column
+
+`--teams` adds a `team` column holding the club or team name on each person's kit, in the same order as their bibs:
+
+```bash
+# Read whatever team name is visible on the kit
+python bib_gemma.py --input ./photos --teams --output out.csv
+
+# Match against the teams you know are competing
+python bib_gemma.py --input ./photos --teams "xXx, 606" --output out.csv
+```
+
+| filename | bib_numbers | colors | team | notes |
+|---|---|---|---|---|
+| `_5D_0004.JPG` | `1129;1171` | black on white; black on white | xXx; 606 | |
+| `_5D_0120.JPG` | `852;illegible` | black on white; unclear | 606; unknown | second bib too small to read |
+| `_5D_0150.JPG` | `1204` | black on white | Riverside Runners | *(a team not on the list)* |
+| `_5D_0180.JPG` | `45` | unclear | unknown | distant |
+
+How the known-team list is used:
+
+- A case-insensitive match is normalised to **your** spelling, so a model that writes `xxx` or `XXX` lands in the column as `xXx` and the column groups cleanly in a pivot table.
+- A team that **isn't** on your list is kept verbatim, not rewritten to the nearest listed name and not dropped. A name the model saw that you didn't list is information — maybe a guest rider, maybe your list is incomplete — so it stays visible.
+- Passing `--teams` with no usable names (e.g. `--teams ","`) is an error rather than a silent fall-through to free-form mode.
+- The end-of-run summary reports coverage: `A team was identified on 3/5 photos (the rest are blank or 'unknown').`
+
+Expect a lot of `unknown`, and treat that as the feature working. The prompt asks for `unknown` explicitly and tells the model **not** to infer a team from kit colours alone, because on a small or blurry jersey that inference is exactly the kind of confident guess that produced the fabricated bib numbers in the first place.
+
+One caution worth keeping in mind: the team list is given to the model as context, which is the same priming risk described under [colors](#why-colors-are-recorded-but-not-filtered-on) — a model told that `xXx` is racing is more likely to report `xXx`. Nothing is filtered on the team value, so a wrong team can't remove a real bib, but treat the column as a lead to verify rather than a fact. If you want to measure the effect, the `--teams`-free run is the control.
 
 ## `illegible`: giving the model a way to admit uncertainty
 
@@ -265,10 +301,13 @@ Each photo is sent to the model with a fixed prompt asking it to reply in exactl
 ```
 BIBS: <comma-separated numbers, "illegible" per unreadable bib, or "none">
 COLORS: <"<digit color> on <background color>" per bib, same order, or "unclear">
+TEAM: <team name per bib, same order, or "unknown">     <-- only with --teams
 NOTES: <one short phrase, optional>
 ```
 
-Only the opening "what to look for" paragraph changes between race types; this response block is shared, so parsing is identical whichever one you pick.
+Only the opening "what to look for" paragraph changes between race types; this response block is shared, so parsing is identical whichever one you pick. The `TEAM:` line and its guidance are added only when `--teams` is passed — every extra instruction is a chance for a small model to drift, so the default prompt stays as short as it was.
+
+Internally each bib and its per-bib fields are carried as one record rather than three parallel lists, so colours and teams can't drift out of alignment with their bib when duplicates are collapsed or a filter drops a reading.
 
 The script regex-parses that fixed format rather than relying on free-form text, which keeps results consistent across runs. Duplicate numbers in one reply are collapsed, keeping the color given for the first occurrence; a reply that omits the `COLORS:` line still parses with the column left blank; and `unreadable` / `can't read` / `not legible` are accepted as synonyms for `illegible`. Any `--min-digits` / `--bib-range` filtering happens after this parse, in Python, so the model never knows what numbering you expect.
 
