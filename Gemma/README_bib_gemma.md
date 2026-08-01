@@ -59,6 +59,9 @@ python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
 
 # Silent run — only errors are reported (for cron jobs and scripts)
 python bib_gemma.py --input /path/to/photos --quiet --output out.csv
+
+# Discard readings outside the race's actual number range
+python bib_gemma.py --input /path/to/photos --bib-range 1000-1699 --output out.csv
 ```
 
 ## Options
@@ -73,6 +76,8 @@ python bib_gemma.py --input /path/to/photos --quiet --output out.csv
 | `--retries` | `1` | Retries if a response can't be parsed |
 | `--limit` | *(all)* | Only process the first N photos found |
 | `--quiet` | off | Report only errors and warnings, on stderr |
+| `--min-digits` | off | Discard readings with fewer than N digits |
+| `--bib-range` | off | Discard readings outside `LOW-HIGH`, e.g. `1000-1699` |
 
 ## Progress and timing
 
@@ -142,17 +147,61 @@ The output CSV/XLSX is byte-for-byte the same as a normal run; `--quiet` only af
 
 ## Output format
 
-CSV/XLSX with three columns:
+CSV/XLSX with four columns:
 
-| filename | bib_numbers | notes |
-|---|---|---|
-| `_5D_0004.JPG` | `129;1171` | |
-| `_5D_0100.JPG` | `none` | cyclists in team kits, no pinned bib visible |
-| `_5D_0200.JPG` | `parse_error` | *(raw model response, truncated)* |
+| filename | bib_numbers | colors | notes |
+|---|---|---|---|
+| `_5D_0004.JPG` | `129;1171` | black on white; black on white | |
+| `_5D_0100.JPG` | `none` | | cyclists in team kits, no pinned bib visible |
+| `_5D_0150.JPG` | `1204` | black on white | distant runners \| filtered out: 45, 7 |
+| `_5D_0200.JPG` | `parse_error` | | *(raw model response, truncated)* |
 
 - Multiple bibs in one photo are semicolon-separated.
-- `none` means the model found no legible bib number in the photo.
+- `colors` is the model's own description of each bib it reported, in the same order — `black on white`, `white on blue`, or `unclear`. It's recorded for analysis, never used to filter (see below).
+- `none` means the model found no legible bib number in the photo — or that every number it reported was removed by a filter, in which case `notes` says which.
 - `parse_error` means the model's reply didn't follow the expected format even after retries — the raw response is kept in `notes` so you can see what happened, rather than the script silently guessing.
+
+## Filtering out implausible readings
+
+Both local models hallucinate far more than they miss: on the 566-photo reference set, `e2b` reported 326 distinct bibs and only 116 were confirmed by the hosted vision read. But the fabrications have a recognisable shape — they're mostly short numbers:
+
+| digits | real bibs (151 distinct) | `e2b`'s 210 unconfirmed reads |
+|---|---|---|
+| 1–2 | 3 | 43 |
+| 3 | 13 | 137 |
+| 4 | 134 | 30 |
+
+Real bibs at that event were overwhelmingly 4-digit in the 1000–1699 band, so the race's own numbering is a much stronger filter than anything the model can self-report:
+
+```bash
+# Drop anything shorter than 3 digits
+python bib_gemma.py --input ./photos --min-digits 3 --output out.csv
+
+# Strongest filter: only keep numbers the race actually issued
+python bib_gemma.py --input ./photos --bib-range 1000-1699 --output out.csv
+
+# Both together
+python bib_gemma.py --input ./photos --min-digits 4 --bib-range 1000-1699 --output out.csv
+```
+
+Filters run per reading, after parsing. **Nothing is discarded silently** — the removed numbers are appended to that row's `notes` as `filtered out: 45, 7`, and the run reports a total at the end:
+
+```
+Filtering readings: keeping only numbers at least 3 digit(s) and within 1000-1699. Discarded numbers are listed in the notes column.
+...
+Filters discarded 58 reading(s) as implausible (see the notes column for which).
+```
+
+So if you set the range too tight, it's visible in the output file rather than invisible. On the reference data, dropping every ≤2-digit reading removes 58 of `e2b`'s 497 readings at the cost of three real ones (`14`, `45`, `1`).
+
+### Why colors are recorded but not filtered on
+
+If you know the bibs are black-on-white it's tempting to have the script reject anything else. Two reasons it doesn't:
+
+1. **Race lighting wrecks apparent color.** Backlighting, shade, motion blur and mixed white balance shift a yellow bib to olive and a white bib to grey. Filtering on color would cost real detections in exactly the hard photos you most want to catch.
+2. **A small vision model tends to agree with you.** Tell it what color the bibs are and the likely outcome isn't that it rejects a hallucinated number — it's that it keeps the number and describes it in the color you suggested. That's why the prompt asks it to report what it sees and to write `unclear` rather than guess, and doesn't state an expected scheme.
+
+Recording the color instead lets you check offline whether it actually correlates with correctness — group the `colors` column against a known-good read and see whether off-scheme rows really are the wrong ones — without paying for another multi-hour run to change your mind.
 
 ## How it works internally
 
@@ -160,10 +209,11 @@ Each photo is sent to the model with a fixed prompt asking it to reply in exactl
 
 ```
 BIBS: <comma-separated numbers, or "none">
+COLORS: <"<digit color> on <background color>" per bib, same order, or "unclear">
 NOTES: <one short phrase, optional>
 ```
 
-The script regex-parses that fixed format rather than relying on free-form text, which keeps results consistent across runs.
+The script regex-parses that fixed format rather than relying on free-form text, which keeps results consistent across runs. Duplicate numbers in one reply are collapsed, keeping the color given for the first occurrence, and a reply that omits the `COLORS:` line still parses — the column is just left blank. Any `--min-digits` / `--bib-range` filtering happens after this parse, in Python, so the model never knows what numbering you expect.
 
 ## Performance
 
@@ -174,3 +224,7 @@ You don't have to guess where a given run will land: the per-photo ETA (see [Pro
 ## Limitations
 
 Smaller local vision models are still not as reliable as a top-tier hosted model — expect some misses on very small, heavily motion-blurred, or steeply angled bibs. It should still substantially outperform `../local-OCR/bib_ocr.py` on the same photos, since it can reason about context instead of just transcribing text. Compare its output against `../local-OCR/bib_ocr.py`'s to see where the two disagree, and spot-check `none`/`parse_error` rows manually.
+
+`--min-digits`/`--bib-range` improve precision but can't fix recall: they remove junk the model reported, and do nothing about bibs it never saw. The likely root cause of the misses is resolution — a bib a few dozen pixels tall in a full frame — so cropping candidate regions before inference would probably help more than any prompt or filter change. The `colors` column exists partly to test that theory: if `unclear` clusters on the photos where readings are wrong, the model is telling you it couldn't resolve the bib.
+
+Note also that the accuracy figures quoted here are agreement with a hosted vision model's read, not human-verified ground truth.
