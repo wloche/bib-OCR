@@ -66,6 +66,24 @@ python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
 | `--host` | `http://localhost:11434` | Ollama server URL |
 | `--retries` | `1` | Retries if a response can't be parsed |
 
+## Progress and timing
+
+Each photo prints a line as it finishes, showing what was found, how long that photo took, the total elapsed time, and an ETA for the rest of the run:
+
+```
+Found 566 photo(s). Using model 'gemma4:e4b' via Ollama at http://localhost:11434.
+[1/566] _5D_0004.JPG ... 129;1171 [9.1s, elapsed 9s, ETA 1h 25m 44s]
+[2/566] _5D_0005.JPG ... none [7.8s, elapsed 17s, ETA 1h 20m 08s]
+[3/566] _5D_0006.JPG ... 482;217 [8.4s, elapsed 25s, ETA 1h 18m 52s]
+...
+[566/566] _5D_0570.JPG ... 903 [8.2s, elapsed 1h 19m 12s]
+
+Done. 498/566 photos had a plausible bib number (3 parse errors). Wrote results to bib_numbers_gemma.csv
+Total time: 1h 19m 12s (8.4s per photo average)
+```
+
+The ETA is the average time per photo so far multiplied by the number of photos remaining, so it settles down after the first handful and drifts as it goes if some photos are much slower than others. The final `Total time` line also reports the per-photo average — useful for estimating a larger batch or comparing `e2b` against `e4b` against `12b` on the same folder.
+
 ## Output format
 
 CSV/XLSX with three columns:
@@ -94,6 +112,8 @@ The script regex-parses that fixed format rather than relying on free-form text,
 ## Performance
 
 This runs entirely on your machine's CPU/GPU — no internet connection or API key needed once the model is downloaded. Without a GPU, expect roughly a few seconds to tens of seconds per photo depending on model size; processing 566 photos on `e4b` on CPU alone could take anywhere from ~30 minutes to a few hours. A GPU will be dramatically faster. If speed matters more than accuracy, try `--model gemma4:e2b`.
+
+You don't have to guess where a given run will land: the per-photo ETA (see [Progress and timing](#progress-and-timing)) gives you a real estimate for *your* hardware within the first few photos.
 
 ## Limitations
 

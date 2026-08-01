@@ -41,6 +41,14 @@ OUTPUT
     Multiple bibs in one photo are separated with semicolons: "482;217"
     "none" means the model found no legible bib number in the photo.
 
+PROGRESS
+    Each photo prints its own line as it finishes, with the time that photo
+    took, the total elapsed time, and an ETA for the whole run based on the
+    average per-photo time so far:
+        [12/566] _5D_0012.JPG ... 129;1171 [8.4s, elapsed 1m 41s, ETA 1h 17m 30s]
+    The final summary reports the total wall-clock time and the average time
+    per photo, which is handy for estimating a bigger batch or comparing models.
+
 NOTES
     - This calls a local Ollama server (default http://localhost:11434) — no
       internet connection or API key is used once the model is downloaded.
@@ -58,6 +66,7 @@ import base64
 import csv
 import re
 import sys
+import time
 from pathlib import Path
 
 PROMPT = """You are looking at a photo from a running/cycling race. Look carefully at every person in the frame for a race bib number — a numbered card, tag, or plate pinned to someone's chest, waist, or back (or printed directly on a jersey).
@@ -80,6 +89,18 @@ NOTES: cyclists in team kits, no pinned bib visible
 
 BIBS_RE = re.compile(r"BIBS:\s*(.+)", re.IGNORECASE)
 NOTES_RE = re.compile(r"NOTES:\s*(.*)", re.IGNORECASE)
+
+
+def format_duration(seconds: float) -> str:
+    """Human-readable duration: '42s', '3m 07s', '1h 24m 09s'."""
+    seconds = int(round(max(seconds, 0)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 
 def find_images(input_dir: Path, recursive: bool, extensions):
@@ -223,8 +244,11 @@ def main():
     print(f"Found {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
 
     rows = []
+    run_start = time.monotonic()
     for i, img_path in enumerate(images, 1):
-        print(f"[{i}/{len(images)}] {img_path.name}")
+        # No newline yet: the timing/ETA is appended once this photo is done.
+        print(f"[{i}/{len(images)}] {img_path.name} ... ", end="", flush=True)
+        photo_start = time.monotonic()
 
         bibs, notes, ok = None, "", False
         last_raw = ""
@@ -252,6 +276,21 @@ def main():
         else:
             rows.append([img_path.name, "parse_error", last_raw.replace("\n", " ")[:200]])
 
+        # ETA from the average time per photo so far, which smooths out the
+        # variation between a quick photo and a slow, crowded one.
+        photo_secs = time.monotonic() - photo_start
+        elapsed = time.monotonic() - run_start
+        remaining = len(images) - i
+        summary = bibs if ok else "parse_error"
+        if remaining:
+            eta = (elapsed / i) * remaining
+            print(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}, "
+                  f"ETA {format_duration(eta)}]")
+        else:
+            print(f"{summary} [{photo_secs:.1f}s, elapsed {format_duration(elapsed)}]")
+
+    total_secs = time.monotonic() - run_start
+
     output_path = Path(args.output)
     if output_path.suffix.lower() == ".xlsx":
         write_xlsx(rows, output_path)
@@ -262,6 +301,8 @@ def main():
     errors = sum(1 for r in rows if r[1] == "parse_error")
     print(f"\nDone. {detected}/{len(rows)} photos had a plausible bib number "
           f"({errors} parse errors). Wrote results to {output_path}")
+    print(f"Total time: {format_duration(total_secs)} "
+          f"({total_secs / len(rows):.1f}s per photo average)")
 
 
 if __name__ == "__main__":
