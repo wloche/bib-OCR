@@ -34,6 +34,7 @@ USAGE
     python bib_gemma.py --input /path/to/photos --output bib_numbers_gemma.csv
     python bib_gemma.py --input /path/to/photos --output bib_numbers_gemma.xlsx --recursive
     python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
+    python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
 
 OUTPUT
     A CSV (or XLSX, if the output filename ends in .xlsx) with one row per photo:
@@ -48,6 +49,11 @@ PROGRESS
         [12/566] _5D_0012.JPG ... 129;1171 [8.4s, elapsed 1m 41s, ETA 1h 17m 30s]
     The final summary reports the total wall-clock time and the average time
     per photo, which is handy for estimating a bigger batch or comparing models.
+
+    Use --limit N for a quick trial run over just the first N photos — the
+    script says up front how many of the photos it found are being skipped,
+    and repeats that reminder at the end so a partial output file isn't
+    mistaken for a complete one.
 
 NOTES
     - This calls a local Ollama server (default http://localhost:11434) — no
@@ -207,11 +213,18 @@ def main():
                          help="Ollama server URL. Default: http://localhost:11434")
     parser.add_argument("--retries", type=int, default=1,
                          help="Retries if the model's response can't be parsed. Default: 1")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="Only process the first N photos found (useful for a quick "
+                              "test run or benchmarking a model). Default: all of them")
     args = parser.parse_args()
 
     input_dir = Path(args.input)
     if not input_dir.is_dir():
         print(f"Error: '{input_dir}' is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    if args.limit is not None and args.limit < 1:
+        print("Error: --limit must be 1 or greater", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -241,7 +254,14 @@ def main():
               f"{' (searched recursively)' if args.recursive else ''}.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Found {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
+    total_found = len(images)
+    if args.limit is not None and args.limit < total_found:
+        images = images[:args.limit]
+        print(f"NOTE: --limit {args.limit} is set — only the first {args.limit} of "
+              f"{total_found} photo(s) found will be processed. The output file will "
+              f"cover those {args.limit} photo(s) only.")
+
+    print(f"Processing {len(images)} photo(s). Using model '{args.model}' via Ollama at {args.host}.")
 
     rows = []
     run_start = time.monotonic()
@@ -299,8 +319,12 @@ def main():
 
     detected = sum(1 for r in rows if r[1] not in ("none", "parse_error"))
     errors = sum(1 for r in rows if r[1] == "parse_error")
+    skipped = total_found - len(rows)
     print(f"\nDone. {detected}/{len(rows)} photos had a plausible bib number "
           f"({errors} parse errors). Wrote results to {output_path}")
+    if skipped:
+        print(f"Reminder: --limit was set, so {skipped} of the {total_found} photo(s) "
+              f"found were not processed.")
     print(f"Total time: {format_duration(total_secs)} "
           f"({total_secs / len(rows):.1f}s per photo average)")
 

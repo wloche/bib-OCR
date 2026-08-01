@@ -53,6 +53,9 @@ python bib_gemma.py --input /path/to/photos --output bib_numbers_gemma.xlsx
 
 # Use a bigger, more accurate model
 python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
+
+# Quick trial run over just the first 10 photos
+python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
 ```
 
 ## Options
@@ -65,6 +68,7 @@ python bib_gemma.py --input /path/to/photos --model gemma4:12b --output out.csv
 | `--model` | `gemma4:e4b` | Ollama model tag to use |
 | `--host` | `http://localhost:11434` | Ollama server URL |
 | `--retries` | `1` | Retries if a response can't be parsed |
+| `--limit` | *(all)* | Only process the first N photos found |
 
 ## Progress and timing
 
@@ -83,6 +87,32 @@ Total time: 1h 19m 12s (8.4s per photo average)
 ```
 
 The ETA is the average time per photo so far multiplied by the number of photos remaining, so it settles down after the first handful and drifts as it goes if some photos are much slower than others. The final `Total time` line also reports the per-photo average — useful for estimating a larger batch or comparing `e2b` against `e4b` against `12b` on the same folder.
+
+## Trial runs with `--limit`
+
+Before committing to a multi-hour run over a full shoot, `--limit N` processes only the first N photos (in the same sorted order the script would otherwise use). It's the quickest way to sanity-check the setup, eyeball accuracy on a sample, or time a model on your hardware.
+
+```bash
+python bib_gemma.py --input /path/to/photos --limit 10 --output sample.csv
+```
+
+The script is explicit about the fact that the run is partial, both up front and again at the end, so a truncated output file doesn't get mistaken for a complete one:
+
+```
+NOTE: --limit 10 is set — only the first 10 of 566 photo(s) found will be processed. The output file will cover those 10 photo(s) only.
+Processing 10 photo(s). Using model 'gemma4:e4b' via Ollama at http://localhost:11434.
+[1/10] _5D_0004.JPG ... 129;1171 [9.1s, elapsed 9s, ETA 1m 22s]
+...
+Done. 9/10 photos had a plausible bib number (0 parse errors). Wrote results to sample.csv
+Reminder: --limit was set, so 556 of the 566 photo(s) found were not processed.
+Total time: 1m 24s (8.4s per photo average)
+```
+
+Notes:
+
+- Write trial runs to a separate output file (`sample.csv` above). Pointing `--limit` at your real output path overwrites it with the partial results.
+- If `--limit` is greater than or equal to the number of photos found, it has no effect and no disclaimer is shown.
+- Multiply the reported per-photo average by your full photo count to estimate the real run: `8.4s × 566 ≈ 1h 20m`.
 
 ## Output format
 
